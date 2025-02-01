@@ -20,7 +20,7 @@ tune run full_finetune_single_device --config llama3_1/8B_full_single_device \
 # CudaGraphs + Padding
 multiplier=512
 while [ $multiplier -ge 1 ]; do
-    TORCH_COMPILE_MODE=reduce-overhead PAD_MULTIPLE=64 \
+    TORCH_COMPILE_MODE=reduce-overhead PAD_MULTIPLE=$multiplier \
     tune run full_finetune_single_device --config llama3_1/8B_full_single_device \
     &> $OUT_DIR/cudagraphs_pad$multiplier.log
 
