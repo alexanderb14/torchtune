@@ -5,12 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import sys
+import os
 import time
 from functools import partial
 from typing import Any, Dict, Optional, Tuple, Union
 from warnings import warn
 
 import torch
+import torch.utils._pytree as pytree
 from omegaconf import DictConfig, ListConfig
 
 from torch import nn
@@ -30,6 +32,12 @@ from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
 
+def get_pad_multiple():
+    pad_multiple = os.environ.get("PAD_MULTIPLE", 0)
+    if pad_multiple != "0":
+        return int(pad_multiple)
+    else:
+        return 0
 
 class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
     """
@@ -627,6 +635,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
         labels = batch.pop("labels")
 
         with self.activations_handling_ctx:
+            # torch.compiler.cudagraph_mark_step_begin()
             logits = self._model(**batch)
 
         # Shift labels to compute loss
@@ -671,8 +680,68 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
             # in case shuffle is True
             self._sampler.set_epoch(curr_epoch)
 
+            with_warmup = os.environ.get("WITH_WARMUP", 0)
+            warmup_min = 2
+            warmup_max = 512
+
+            pad_multiple = get_pad_multiple()
+
+            if with_warmup == "1":
+                print("-" * 10 + " WARMUP " + "-" * 10)
+                warmup_start = time.time()
+
+                def run_size(N):
+                    batch = {
+                        "tokens": torch.zeros(2, N, dtype=torch.int),
+                        "labels": torch.zeros(2, N, dtype=torch.int),
+                    }
+                    utils.batch_to_device(batch, self._device)
+                    torch.compiler.cudagraph_mark_step_begin()
+                    current_loss = self._loss_step(batch)
+                    print("warming up size:", N)
+
+                print("Warming up sizes", warmup_min, "to", warmup_max)
+                if pad_multiple != 0:
+                    N = pad_multiple
+                    while N < warmup_max:
+                        for _ in range(5):
+                            run_size(N)
+                        N += pad_multiple
+
+                else:
+                    for N in range(warmup_min, warmup_max):
+                        for _ in range(5):
+                            run_size(N)
+
+                print("Warmup time: ", time.time() - warmup_start)
+
+            epoch_start = time.time()
+
+
+
+
             pbar = tqdm(total=self._steps_per_epoch)
             for idx, batch in enumerate(self._dataloader):
+                max_num_batches = int(os.environ.get("MAX_NUM_BATCHES", -1))
+                if idx == max_num_batches:
+                    break
+
+                # Check that the size was warmed up
+                # if with_warmup == "1":
+                assert batch["tokens"].shape[1] > warmup_min
+                assert batch["tokens"].shape[1] < warmup_max
+
+                # Pad seqlen to muptiple of pad_multiple
+                if pad_multiple != 0:
+                    pad = pad_multiple - batch["tokens"].shape[1] % pad_multiple
+                    batch["tokens"] = torch.nn.functional.pad(batch["tokens"], (0, pad))
+                    batch["labels"] = torch.nn.functional.pad(batch["labels"], (0, pad))
+
+                print(
+                    "\n" + str(pytree.tree_map(lambda x: x.shape, batch)),
+                    file=sys.stderr,
+                )
+
                 if (
                     self.max_steps_per_epoch is not None
                     and (idx // self._gradient_accumulation_steps)
@@ -699,6 +768,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                 # Loss is normalized by default so we multiply by the number of tokens
                 # This way we can normalize by the total number of tokens if we're accumulating gradients
+                torch.compiler.cudagraph_mark_step_begin()
                 current_loss = self._loss_step(batch) * current_num_tokens
                 running_loss += current_loss
                 current_loss.backward()
@@ -774,6 +844,8 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 # Note we are stepping each batch, which might not include optimizer step in the trace
                 # if the schedule cycle doesn't align with gradient accumulation.
                 self._profiler.step()
+
+            print("Epoch time: ", time.time() - epoch_start)
 
             self.epochs_run += 1
             self.save_checkpoint(epoch=curr_epoch)

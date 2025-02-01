@@ -43,6 +43,7 @@ def compile_model(
 
     """
     backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
+    mode = os.environ.get("TORCH_COMPILE_MODE", "")
     if isinstance(model, DeepFusionModel):
         model = model.decoder
     # Per-layer compilation by default
@@ -52,7 +53,11 @@ def compile_model(
         if isinstance(m, TransformerSelfAttentionLayer) or isinstance(
             m, TransformerCrossAttentionLayer
         ):
-            m.compile(backend=backend)
+            if mode:
+                print("For model, using backend", backend, "and mode", mode)
+                m.compile(backend=backend, mode=mode)
+            else:
+                m.compile(backend=backend)
 
 
 def compile_loss(loss: nn.Module, verbose: bool = True) -> nn.Module:
@@ -69,14 +74,18 @@ def compile_loss(loss: nn.Module, verbose: bool = True) -> nn.Module:
             CEWithChunkedOutputLoss) only the upcast and cross-entropy calculation compiled.
     """
     backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
+    mode = os.environ.get("TORCH_COMPILE_MODE", "default")
+
+    print("For loss, using backend", backend, "and mode", mode)
+
     if verbose:
         log.info("Compiling loss with torch.compile...")
     if isinstance(loss, CEWithChunkedOutputLoss):
         loss.compute_cross_entropy = torch.compile(
-            loss.compute_cross_entropy, backend=backend
+            loss.compute_cross_entropy, backend=backend, mode=mode
         )
     elif isinstance(loss, ForwardKLWithChunkedOutputLoss):
-        loss.fkl_loss = torch.compile(loss.fkl_loss, backend=backend)
+        loss.fkl_loss = torch.compile(loss.fkl_loss, backend=backend, mode=mode)
     else:
-        loss = torch.compile(loss, backend=backend)
+        loss = torch.compile(loss, backend=backend, mode=mode)
     return loss
