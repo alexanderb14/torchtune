@@ -682,7 +682,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
             with_warmup = os.environ.get("WITH_WARMUP", 0)
             warmup_min = 2
-            warmup_max = 512
+            warmup_max = 512 + 1
 
             pad_multiple = get_pad_multiple()
 
@@ -692,8 +692,8 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                 def run_size(N):
                     batch = {
-                        "tokens": torch.zeros(2, N, dtype=torch.int),
-                        "labels": torch.zeros(2, N, dtype=torch.int),
+                        "tokens": torch.zeros(2, N, dtype=torch.int64),
+                        "labels": torch.zeros(2, N, dtype=torch.int64),
                     }
                     utils.batch_to_device(batch, self._device)
                     torch.compiler.cudagraph_mark_step_begin()
