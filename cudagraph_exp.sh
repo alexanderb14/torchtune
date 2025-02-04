@@ -25,8 +25,8 @@ tune run full_finetune_single_device --config llama3_1/8B_full_single_device \
 &> $OUT_DIR/default_disabled_padding.log
 
 # CudaGraphs + Padding
-multiplier=512
-while [ $multiplier -ge 1 ]; do
+multiplier=8
+while [ $multiplier -ge 0 ]; do
     TORCH_COMPILE_MODE=reduce-overhead PAD_MULTIPLE=$multiplier \
     tune run full_finetune_single_device --config llama3_1/8B_full_single_device \
     &> $OUT_DIR/cudagraphs_pad$multiplier.log
