@@ -760,6 +760,8 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 running_loss += current_loss
                 current_loss.backward()
 
+                torch.cuda.synchronize()
+
                 loss_time_batch = time.time() - loss_time_start
                 print("Loss time for batch: ", loss_time_batch, file=sys.stderr)
                 loss_time += loss_time_batch
@@ -821,6 +823,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     num_tokens = 0
                     t0 = time.perf_counter()
 
+                torch.cuda.synchronize()
                 opt_time_batch = time.time() - opt_time_start
                 print("Opt time for batch: ", opt_time_batch, file=sys.stderr)
                 opt_time += opt_time_batch
@@ -842,6 +845,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 # if the schedule cycle doesn't align with gradient accumulation.
                 self._profiler.step()
 
+            torch.cuda.synchronize()
             epoch_time = time.time() - epoch_start
 
             print("Overall Epoch time: ", epoch_time)
