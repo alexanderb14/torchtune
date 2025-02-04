@@ -6,16 +6,23 @@ set -e
 OUT_DIR=exp_outs
 
 export CONFIG="llama3_1/8B_full_single_device"
-export MAX_NUM_BATCHES=1000
+export MAX_NUM_BATCHES=10
 export WITH_WARMUP=1
 export TORCH_COMPILE_BACKEND=inductor
 
 mkdir -p $OUT_DIR
 
-# Baseline
+# Default
 TORCH_COMPILE_MODE=default \
 tune run full_finetune_single_device --config llama3_1/8B_full_single_device \
-&> $OUT_DIR/default_no_padding.log
+&> $OUT_DIR/default.log
+
+# Default without padding
+TORCHINDUCTOR_COMPREHENSIVE_PADDING=0 \
+TORCHINDUCTOR_SHAPE_PADDING=0 \
+TORCH_COMPILE_MODE=default \
+tune run full_finetune_single_device --config llama3_1/8B_full_single_device \
+&> $OUT_DIR/default_disabled_padding.log
 
 # CudaGraphs + Padding
 multiplier=512
