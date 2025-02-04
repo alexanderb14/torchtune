@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import sys
+import os
 import time
 from functools import partial
 from typing import Any, Dict, Optional, Tuple, Union
@@ -16,6 +17,8 @@ from omegaconf import DictConfig, ListConfig
 from torch import nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
+import torch.utils._pytree as pytree
+
 
 from torchtune import config, modules, training, utils
 from torchtune.config._utils import _get_component_from_path
@@ -664,6 +667,31 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
         running_loss = 0
         num_tokens = 0
 
+        MAX_NUM_BATCHES = 20
+
+        # Record batch data
+        batch_data = []
+        for idx, batch in enumerate(self._dataloader):
+            if idx == MAX_NUM_BATCHES:
+                break
+            batch_data.append((idx, batch))
+
+        # Warmup with random batch
+        for idx, batch in batch_data:
+            for _ in tqdm(range(4), desc="Warming up batch %d with size %s" % (idx, str(pytree.tree_map(lambda x: x.shape, batch)))):
+                # Create random batch
+                batch_rand = {
+                    "tokens": batch["tokens"].clone(),
+                    "labels": batch["labels"].clone(),
+                }
+                utils.batch_to_device(batch_rand, self._device)
+
+                torch.compiler.cudagraph_mark_step_begin()
+                loss = self._loss_step(batch_rand)
+                loss.backward()
+
+        print("Warmup complete")
+
         self._profiler.start()
         # self.epochs_run should be non-zero when we're resuming from a checkpoint
         for curr_epoch in range(self.epochs_run, self.total_epochs):
@@ -672,7 +700,12 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
             self._sampler.set_epoch(curr_epoch)
 
             pbar = tqdm(total=self._steps_per_epoch)
-            for idx, batch in enumerate(self._dataloader):
+            for idx, batch in batch_data:
+                print(
+                    "\n" + str(pytree.tree_map(lambda x: x.shape, batch)),
+                    file=sys.stderr,
+                )
+
                 if (
                     self.max_steps_per_epoch is not None
                     and (idx // self._gradient_accumulation_steps)
@@ -699,9 +732,17 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                 # Loss is normalized by default so we multiply by the number of tokens
                 # This way we can normalize by the total number of tokens if we're accumulating gradients
+                loss_time_start = time.time()
+
+                torch.compiler.cudagraph_mark_step_begin()
                 current_loss = self._loss_step(batch) * current_num_tokens
                 running_loss += current_loss
                 current_loss.backward()
+
+                torch.cuda.synchronize()
+
+                loss_time = time.time() - loss_time_start
+                print("Loss time of batch %d: %f" % (idx, loss_time), file=sys.stderr)
 
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
@@ -776,7 +817,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 self._profiler.step()
 
             self.epochs_run += 1
-            self.save_checkpoint(epoch=curr_epoch)
+            #self.save_checkpoint(epoch=curr_epoch)
 
         self._profiler.stop()
 
@@ -800,5 +841,19 @@ def recipe_main(cfg: DictConfig) -> None:
     recipe.cleanup()
 
 
-if __name__ == "__main__":
-    sys.exit(recipe_main())
+PROFILE_FILENAME = os.environ.get("PROFILE_FILENAME", "")
+if PROFILE_FILENAME != "":
+    from torch.profiler import profile, ProfilerActivity
+
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA, ProfilerActivity.XPU]
+    if __name__ == "__main__":
+       prof = None
+       try:
+           with profile(activities=activities) as prof:
+               sys.exit(recipe_main())
+       finally:
+
+           prof.export_chrome_trace(PROFILE_FILENAME)
+else:
+    if __name__ == "__main__":
+        sys.exit(recipe_main())
