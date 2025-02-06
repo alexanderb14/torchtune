@@ -7,16 +7,21 @@ OUT_DIR=exp_outs
 
 mkdir -p $OUT_DIR
 
+mkdir -p $OUT_DIR/inductor-default
+mkdir -p $OUT_DIR/inductor-reduce-overhead
+
 # Log Metrics
 # ##################
-# Default
-tune run full_finetune_single_device --config llama3_1/8B_full_single_device \
-&> $OUT_DIR/inductor-default.log
+for i in {1..10}; do
+    # Default
+    tune run full_finetune_single_device --config llama3_1/8B_full_single_device \
+    &> $OUT_DIR/inductor-default/$i.log
 
-# Reduce overhead
-TORCH_COMPILE_MODE=reduce-overhead \
-tune run full_finetune_single_device --config llama3_1/8B_full_single_device \
-&> $OUT_DIR/inductor-reduce-overhead.log
+    # Reduce overhead
+    TORCH_COMPILE_MODE=reduce-overhead \
+    tune run full_finetune_single_device --config llama3_1/8B_full_single_device \
+    &> $OUT_DIR/inductor-reduce-overhead/$i.log
+done
 
 # Profile
 # ##################
