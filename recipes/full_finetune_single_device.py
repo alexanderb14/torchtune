@@ -629,8 +629,14 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # Shape [b, s], needed for the loss not the model
         labels = batch.pop("labels")
 
+        forward_time_start = time.time()
+
         with self.activations_handling_ctx:
             logits = self._model(**batch)
+
+        torch.cuda.synchronize()
+
+        forward_time = time.time() - forward_time_start
 
         # Shift labels to compute loss
         # equivalent to doing labels[..., 1:] and logits[..., :-1, :]
@@ -647,7 +653,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # free logits otherwise it peaks backward memory
         del logits
 
-        return loss
+        return loss, forward_time
 
     def train(self) -> None:
         """
@@ -667,7 +673,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
         running_loss = 0
         num_tokens = 0
 
-        MAX_NUM_BATCHES = 20
+        MAX_NUM_BATCHES = 50
 
         # Record batch data
         batch_data = []
@@ -687,7 +693,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 utils.batch_to_device(batch_rand, self._device)
 
                 torch.compiler.cudagraph_mark_step_begin()
-                loss = self._loss_step(batch_rand)
+                loss, _ = self._loss_step(batch_rand)
                 loss.backward()
 
         print("Warmup complete")
@@ -732,17 +738,20 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                 # Loss is normalized by default so we multiply by the number of tokens
                 # This way we can normalize by the total number of tokens if we're accumulating gradients
-                loss_time_start = time.time()
-
                 torch.compiler.cudagraph_mark_step_begin()
-                current_loss = self._loss_step(batch) * current_num_tokens
+                loss, forward_time = self._loss_step(batch)
+                current_loss = loss * current_num_tokens
                 running_loss += current_loss
-                current_loss.backward()
 
+                print("Forward time of batch %d: %f" % (idx, forward_time), file=sys.stderr)
+
+                # Backward pass
+                backward_time_start = time.time()
+
+                current_loss.backward()
                 torch.cuda.synchronize()
 
-                loss_time = time.time() - loss_time_start
-                print("Loss time of batch %d: %f" % (idx, loss_time), file=sys.stderr)
+                print("Backward time of batch %d: %f" % (idx, time.time() - backward_time_start), file=sys.stderr)
 
                 # Step with optimizer
                 if (idx + 1) % self._gradient_accumulation_steps == 0:
