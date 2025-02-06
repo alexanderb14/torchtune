@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch.autograd.profiler as profiler
 import sys
 import os
 import time
@@ -629,14 +630,15 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # Shape [b, s], needed for the loss not the model
         labels = batch.pop("labels")
 
-        forward_time_start = time.time()
+        with profiler.record_function("FORWARD"):
+            forward_time_start = time.time()
 
-        with self.activations_handling_ctx:
-            logits = self._model(**batch)
+            with self.activations_handling_ctx:
+                logits = self._model(**batch)
 
-        torch.cuda.synchronize()
+            torch.cuda.synchronize()
 
-        forward_time = time.time() - forward_time_start
+            forward_time = time.time() - forward_time_start
 
         # Shift labels to compute loss
         # equivalent to doing labels[..., 1:] and logits[..., :-1, :]
@@ -649,7 +651,8 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
             logits = logits.reshape(-1, logits.size(-1))
 
         # Compute loss
-        loss = self._loss_fn(logits, labels)
+        with profiler.record_function("LOSS_COMPUTATION"):
+            loss = self._loss_fn(logits, labels)
         # free logits otherwise it peaks backward memory
         del logits
 
@@ -682,19 +685,20 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 break
             batch_data.append((idx, batch))
 
-        # Warmup with random batch
-        for idx, batch in batch_data:
-            for _ in tqdm(range(4), desc="Warming up batch %d with size %s" % (idx, str(pytree.tree_map(lambda x: x.shape, batch)))):
-                # Create random batch
-                batch_rand = {
-                    "tokens": batch["tokens"].clone(),
-                    "labels": batch["labels"].clone(),
-                }
-                utils.batch_to_device(batch_rand, self._device)
+        # Warmup with the batches that training will see
+        with profiler.record_function("WARMUP"):
+            for idx, batch in batch_data:
+                for _ in tqdm(range(4), desc="Warming up batch %d with size %s" % (idx, str(pytree.tree_map(lambda x: x.shape, batch)))):
+                    # Create random batch
+                    batch_rand = {
+                        "tokens": batch["tokens"].clone(),
+                        "labels": batch["labels"].clone(),
+                    }
+                    utils.batch_to_device(batch_rand, self._device)
 
-                torch.compiler.cudagraph_mark_step_begin()
-                loss, _ = self._loss_step(batch_rand)
-                loss.backward()
+                    torch.compiler.cudagraph_mark_step_begin()
+                    loss, _ = self._loss_step(batch_rand)
+                    loss.backward()
 
         print("Warmup complete")
 
@@ -707,123 +711,126 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
             pbar = tqdm(total=self._steps_per_epoch)
             for idx, batch in batch_data:
-                print(
-                    "\n" + str(pytree.tree_map(lambda x: x.shape, batch)),
-                    file=sys.stderr,
-                )
-
-                if (
-                    self.max_steps_per_epoch is not None
-                    and (idx // self._gradient_accumulation_steps)
-                    == self.max_steps_per_epoch
-                ):
-                    break
-
-                # Start tracking CUDA memory for active steps for just the first epoch
-                if (
-                    curr_epoch == 0
-                    and self.profiler_profile_memory
-                    and idx == self.profiler_wait_steps + self.profiler_warmup_steps
-                    and self._device.type == "cuda"
-                ):
-                    torch.cuda.memory._record_memory_history()
-                utils.batch_to_device(batch, self._device)
-
-                # Calculate the number of unmasked tokens in the current batch
-                # and increment the total number of tokens seen in the step
-                current_num_tokens = (
-                    batch["labels"] != self._loss_fn.ignore_index
-                ).sum()
-                num_tokens += current_num_tokens
-
-                # Loss is normalized by default so we multiply by the number of tokens
-                # This way we can normalize by the total number of tokens if we're accumulating gradients
-                torch.compiler.cudagraph_mark_step_begin()
-                loss, forward_time = self._loss_step(batch)
-                current_loss = loss * current_num_tokens
-                running_loss += current_loss
-
-                print("Forward time of batch %d: %f" % (idx, forward_time), file=sys.stderr)
-
-                # Backward pass
-                backward_time_start = time.time()
-
-                current_loss.backward()
-                torch.cuda.synchronize()
-
-                print("Backward time of batch %d: %f" % (idx, time.time() - backward_time_start), file=sys.stderr)
-
-                # Step with optimizer
-                if (idx + 1) % self._gradient_accumulation_steps == 0:
-                    if not self._optimizer_in_bwd:
-                        training.scale_grads(self._model, 1 / num_tokens)
-                        if self._clip_grad_norm is not None:
-                            grad_norm = torch.nn.utils.clip_grad_norm_(
-                                self._model.parameters(),
-                                max_norm=float(self._clip_grad_norm),
-                            )
-                        self._optimizer.step()
-                        self._optimizer.zero_grad(set_to_none=True)
-
-                    # Need to fix `lr_scheduler.step()` before `optimizer.step()` warning
-                    if self._lr_scheduler is not None:
-                        self._lr_scheduler.step()
-                    self.global_step += 1
-
-                    loss_to_log = running_loss.item() / num_tokens
-                    pbar.update(1)
-                    pbar.set_description(
-                        f"{curr_epoch + 1}|{self.global_step}|Loss: {loss_to_log}"
+                with profiler.record_function("BATCH_%d" % idx):
+                    print(
+                        "\n" + str(pytree.tree_map(lambda x: x.shape, batch)),
+                        file=sys.stderr,
                     )
 
-                    # Log per-step metrics
-                    if self.global_step % self._log_every_n_steps == 0:
-                        time_per_step = time.perf_counter() - t0
-                        log_dict = {
-                            "loss": loss_to_log,
-                            # NOTE: for optim in backward, this assumes all optimizers have the same LR. This is currently
-                            # true since we don't expose the ability to configure this yet.
-                            "lr": get_lr(
-                                (
-                                    self._optimizer
-                                    if not self._optimizer_in_bwd
-                                    else self._optim_ckpt_wrapper
-                                ),
-                            ),
-                            "tokens_per_second_per_gpu": num_tokens / time_per_step,
-                        }
-                        if self._device.type != "cpu" and self._log_peak_memory_stats:
-                            log_dict.update(
-                                training.get_memory_stats(device=self._device)
+                    if (
+                        self.max_steps_per_epoch is not None
+                        and (idx // self._gradient_accumulation_steps)
+                        == self.max_steps_per_epoch
+                    ):
+                        break
+
+                    # Start tracking CUDA memory for active steps for just the first epoch
+                    if (
+                        curr_epoch == 0
+                        and self.profiler_profile_memory
+                        and idx == self.profiler_wait_steps + self.profiler_warmup_steps
+                        and self._device.type == "cuda"
+                    ):
+                        torch.cuda.memory._record_memory_history()
+                    utils.batch_to_device(batch, self._device)
+
+                    # Calculate the number of unmasked tokens in the current batch
+                    # and increment the total number of tokens seen in the step
+                    current_num_tokens = (
+                        batch["labels"] != self._loss_fn.ignore_index
+                    ).sum()
+                    num_tokens += current_num_tokens
+
+                    # Loss is normalized by default so we multiply by the number of tokens
+                    # This way we can normalize by the total number of tokens if we're accumulating gradients
+                    torch.compiler.cudagraph_mark_step_begin()
+                    loss, forward_time = self._loss_step(batch)
+                    current_loss = loss * current_num_tokens
+                    running_loss += current_loss
+
+                    print("Forward time of batch %d: %f" % (idx, forward_time), file=sys.stderr)
+
+                    with profiler.record_function("BACKWARD"):
+                        # Backward pass
+                        backward_time_start = time.time()
+
+                        current_loss.backward()
+                        torch.cuda.synchronize()
+
+                        print("Backward time of batch %d: %f" % (idx, time.time() - backward_time_start), file=sys.stderr)
+
+                    with profiler.record_function("STEP"):
+                        # Step with optimizer
+                        if (idx + 1) % self._gradient_accumulation_steps == 0:
+                            if not self._optimizer_in_bwd:
+                                training.scale_grads(self._model, 1 / num_tokens)
+                                if self._clip_grad_norm is not None:
+                                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                                        self._model.parameters(),
+                                        max_norm=float(self._clip_grad_norm),
+                                    )
+                                self._optimizer.step()
+                                self._optimizer.zero_grad(set_to_none=True)
+
+                            # Need to fix `lr_scheduler.step()` before `optimizer.step()` warning
+                            if self._lr_scheduler is not None:
+                                self._lr_scheduler.step()
+                            self.global_step += 1
+
+                            loss_to_log = running_loss.item() / num_tokens
+                            pbar.update(1)
+                            pbar.set_description(
+                                f"{curr_epoch + 1}|{self.global_step}|Loss: {loss_to_log}"
                             )
-                        if self._clip_grad_norm is not None:
-                            log_dict.update({"grad_norm": grad_norm})
-                        self._metric_logger.log_dict(
-                            log_dict,
-                            step=self.global_step,
-                        )
 
-                    # Reset running stats for the next step
-                    running_loss = 0
-                    num_tokens = 0
-                    t0 = time.perf_counter()
+                            # Log per-step metrics
+                            if self.global_step % self._log_every_n_steps == 0:
+                                time_per_step = time.perf_counter() - t0
+                                log_dict = {
+                                    "loss": loss_to_log,
+                                    # NOTE: for optim in backward, this assumes all optimizers have the same LR. This is currently
+                                    # true since we don't expose the ability to configure this yet.
+                                    "lr": get_lr(
+                                        (
+                                            self._optimizer
+                                            if not self._optimizer_in_bwd
+                                            else self._optim_ckpt_wrapper
+                                        ),
+                                    ),
+                                    "tokens_per_second_per_gpu": num_tokens / time_per_step,
+                                }
+                                if self._device.type != "cpu" and self._log_peak_memory_stats:
+                                    log_dict.update(
+                                        training.get_memory_stats(device=self._device)
+                                    )
+                                if self._clip_grad_norm is not None:
+                                    log_dict.update({"grad_norm": grad_norm})
+                                self._metric_logger.log_dict(
+                                    log_dict,
+                                    step=self.global_step,
+                                )
 
-                # Stop tracking CUDA memory now that active steps are complete
-                if (
-                    curr_epoch == 0
-                    and self.profiler_profile_memory
-                    and idx
-                    == self.profiler_wait_steps
-                    + self.profiler_warmup_steps
-                    + self.profiler_active_steps
-                    and self._device.type == "cuda"
-                ):
-                    torch.cuda.memory._record_memory_history(enabled=None)
+                            # Reset running stats for the next step
+                            running_loss = 0
+                            num_tokens = 0
+                            t0 = time.perf_counter()
 
-                # Step the profiler
-                # Note we are stepping each batch, which might not include optimizer step in the trace
-                # if the schedule cycle doesn't align with gradient accumulation.
-                self._profiler.step()
+                        # Stop tracking CUDA memory now that active steps are complete
+                        if (
+                            curr_epoch == 0
+                            and self.profiler_profile_memory
+                            and idx
+                            == self.profiler_wait_steps
+                            + self.profiler_warmup_steps
+                            + self.profiler_active_steps
+                            and self._device.type == "cuda"
+                        ):
+                            torch.cuda.memory._record_memory_history(enabled=None)
+
+                        # Step the profiler
+                        # Note we are stepping each batch, which might not include optimizer step in the trace
+                        # if the schedule cycle doesn't align with gradient accumulation.
+                        self._profiler.step()
 
             self.epochs_run += 1
             #self.save_checkpoint(epoch=curr_epoch)
