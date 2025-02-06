@@ -33,37 +33,48 @@ def main():
 
     # Create csv header
     with open(OUT_FILE, "w") as f:
-        f.write("batch_idx,shape,mode,forward_time\n")
+        f.write("batch_idx,shape,mode,forward_time,backward_time\n")
 
-    # Get loss times
-    def get_loss_times(log):
-        return [line for line in log.split("\n") if "Forward time of batch " in line]
+    # Get times
+    def get_times(log, time_type):
+        return [line for line in log.split("\n") if "%s time of batch " % time_type in line]
 
-    loss_times_default = get_loss_times(log_default)
-    loss_times_reduce_overhead = get_loss_times(log_reduce_overhead)
-    assert len(loss_times_default) == len(
-        loss_times_reduce_overhead
+    fwd_times_default = get_times(log_default, "Forward")
+    fwd_times_reduce_overhead = get_times(log_reduce_overhead, "Forward")
+
+    bck_times_default = get_times(log_default, "Backward")
+    bck_times_reduce_overhead = get_times(log_reduce_overhead, "Backward")
+
+    assert len(fwd_times_default) == len(
+        fwd_times_reduce_overhead
     ), "Number of loss times are different between the two experiments"
 
     shapes = get_batch_shapes(log_default)
     shapes = [shape.split(", ")[1].split("]")[0] for shape in shapes]
 
     # Write to csv
-    for batch_idx, (loss_time_default, loss_time_reduce_overhead, shape) in enumerate(
-        zip(loss_times_default, loss_times_reduce_overhead, shapes)
+    for batch_idx, (fwd_time_default, fwd_time_reduce_overhead, bck_times_default, bck_times_reduce_overhead, shape) in enumerate(
+        zip(fwd_times_default, fwd_times_reduce_overhead, bck_times_default, bck_times_reduce_overhead, shapes)
     ):
-        # Parse loss times
-        loss_time_default = float(
-            loss_time_default.split("Forward time of batch %d: " % batch_idx)[1]
+        # Parse times
+        fwd_time_default = float(
+            fwd_time_default.split("Forward time of batch %d: " % batch_idx)[1]
         )
-        loss_time_reduce_overhead = float(
-            loss_time_reduce_overhead.split("Forward time of batch %d: " % batch_idx)[1]
+        fwd_time_reduce_overhead = float(
+            fwd_time_reduce_overhead.split("Forward time of batch %d: " % batch_idx)[1]
+        )
+
+        bck_time_default = float(
+            bck_times_default.split("Backward time of batch %d: " % batch_idx)[1]
+        )
+        bck_time_reduce_overhead = float(
+            bck_times_reduce_overhead.split("Backward time of batch %d: " % batch_idx)[1]
         )
 
         # Write to csv
         with open(OUT_FILE, "a") as f:
-            f.write(f"{batch_idx},{shape},default,{loss_time_default}\n")
-            f.write(f"{batch_idx},{shape},reduce-overhead,{loss_time_reduce_overhead}\n")
+            f.write(f"{batch_idx},{shape},default,{fwd_time_default},{bck_time_default}\n")
+            f.write(f"{batch_idx},{shape},reduce-overhead,{fwd_time_reduce_overhead},{bck_time_reduce_overhead}\n")
 
 
 if __name__ == "__main__":
