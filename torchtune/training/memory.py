@@ -9,6 +9,7 @@ import logging
 
 from typing import Any, Callable, Dict, Set, Type, Union
 
+import torch.autograd.profiler as profiler
 import torch
 from torch import nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -234,8 +235,9 @@ def register_optim_in_bwd_hooks(
     """
 
     def optim_step(param) -> None:
-        optim_dict[param].step()
-        optim_dict[param].zero_grad()
+        with profiler.record_function("OPTIMIZER_STEP_IN_BWD"):
+            optim_dict[param].step()
+            optim_dict[param].zero_grad()
 
     for p in model.parameters():
         if p.requires_grad:

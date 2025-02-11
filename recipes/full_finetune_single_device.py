@@ -20,7 +20,6 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.utils._pytree as pytree
 
-
 from torchtune import config, modules, training, utils
 from torchtune.config._utils import _get_component_from_path
 from torchtune.data import padded_collate_packed
@@ -759,7 +758,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                         print("Backward time of batch %d: %f" % (idx, time.time() - backward_time_start), file=sys.stderr)
 
-                    with profiler.record_function("STEP"):
+                    with profiler.record_function("OPTIMIZER_STEP"):
                         # Step with optimizer
                         if (idx + 1) % self._gradient_accumulation_steps == 0:
                             if not self._optimizer_in_bwd:
