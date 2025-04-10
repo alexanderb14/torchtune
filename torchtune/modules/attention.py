@@ -236,7 +236,7 @@ class MultiHeadAttention(nn.Module):
 
         # number of queries per key/value
         q_per_kv = self.num_heads // self.num_kv_heads
-        q = q.view(b, s_x, self.num_kv_heads * q_per_kv, self.head_dim)
+        q = q.view(b, -1, self.num_kv_heads * q_per_kv, self.head_dim)
 
         # Apply positional embeddings
         if self.pos_embeddings is not None:
@@ -265,8 +265,8 @@ class MultiHeadAttention(nn.Module):
 
             # Apply positional embeddings
             # k,v shape: [b, s_y, n_kv, h_d]
-            k = k.view(b, s_y, -1, self.head_dim)
-            v = v.view(b, s_y, -1, self.head_dim)
+            k = k.view(b, -1, self.num_kv_heads, self.head_dim)
+            v = v.view(b, -1, self.num_kv_heads, self.head_dim)
             if self.pos_embeddings is not None:
                 k = self.pos_embeddings(k, input_pos=input_pos)
 
@@ -300,5 +300,5 @@ class MultiHeadAttention(nn.Module):
         )
 
         # reshape the output to be the same shape as the input
-        output = output.transpose(1, 2).contiguous().view(b, s_x, -1)
+        output = output.transpose(1, 2).contiguous().view(b, -1, self.embed_dim)
         return self.output_proj(output)

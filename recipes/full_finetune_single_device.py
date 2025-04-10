@@ -11,9 +11,11 @@ from typing import Any, Dict, Optional, Union
 from warnings import warn
 
 import torch
+import torch.utils._pytree as pytree
 from omegaconf import DictConfig, ListConfig
-
 from torch import nn
+
+from torch._inductor.experimental.padded_tensor import PaddedTensor
 from torch.optim import Optimizer
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchdata.stateful_dataloader.sampler import StatefulDistributedSampler
@@ -633,8 +635,19 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # Shape [b, s], needed for the loss not the model
         labels = batch.pop("labels")
 
+        # Pad
+        input_pos = torch.arange(labels.shape[1], dtype=labels.dtype)
+        batch = {
+            "tokens": PaddedTensor.from_tensor(batch["tokens"], {1: 8}, 128004),
+            "input_pos": PaddedTensor.from_tensor(input_pos, {0: 8}, -1),
+        }
+
+        # Run model
         with self.activations_handling_ctx:
             logits = self._model(**batch)
+
+        # Unpad
+        logits = pytree.tree_map(lambda x: x.unpad(), logits)
 
         # Shift labels to compute loss
         # equivalent to doing labels[..., 1:] and logits[..., :-1, :]

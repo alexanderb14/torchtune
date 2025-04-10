@@ -10,6 +10,34 @@ import torch
 import torch.nn.functional as F
 
 
+def chunk_tensor_by_sizes(
+    A: torch.Tensor, chunk_sizes: List[int]
+) -> List[torch.Tensor]:
+    """
+    Chunk tensor A into a list of tensors with the specified chunk sizes.
+    Args:
+        A (torch.Tensor): The tensor to be chunked.
+        chunk_sizes (list[int]): The list of chunk sizes.
+    Returns:
+        list[torch.Tensor]: The chunked tensor A.
+    """
+    # Check if the sum of chunk sizes matches the size of tensor A
+    assert sum(chunk_sizes) == A.shape[1], "Chunk sizes do not match tensor size"
+    # Initialize an empty list to store the chunked tensors
+    chunked_tensors = []
+    # Initialize a counter to keep track of the current position in tensor A
+    pos = 0
+    # Iterate over the chunk sizes
+    for chunk_size in chunk_sizes:
+        # Slice tensor A at the current position with the current chunk size
+        chunk = A[:, pos : pos + chunk_size]
+        # Append the chunk to the list of chunked tensors
+        chunked_tensors.append(chunk)
+        # Update the position counter
+        pos += chunk_size
+    return chunked_tensors
+
+
 class CEWithChunkedOutputLoss(torch.nn.Module):
     """
     Cross-entropy with chunked outputs that saves memory by only upcasting one chunk at a time.
@@ -65,15 +93,15 @@ class CEWithChunkedOutputLoss(torch.nn.Module):
 
         total_elements = (labels != self.ignore_index).sum()
 
-        # chunk and reshape labels (bsz, num_tokens, vocab) -> [(bsz*num_tokens/num_chunks, vocab)]
-        labels = [
-            target_chunk.reshape(-1)
-            for target_chunk in labels.chunk(self.num_output_chunks, dim=1)
-        ]
         # reshape logits [(bsz, num_tokens/num_chunks, vocab)] -> [(bsz*num_tokens/num_chunks, vocab)]
         logits = [
             logit_chunk.reshape(-1, logit_chunk.size(-1)) for logit_chunk in logits
         ]
+
+        # chunk and reshape labels (bsz, num_tokens, vocab) -> [(bsz*num_tokens/num_chunks, vocab)]
+        batch_size = labels.shape[0]
+        chunk_sizes = [l.shape[0] // batch_size for l in logits]
+        labels = [l.reshape(-1) for l in chunk_tensor_by_sizes(labels, chunk_sizes)]
 
         # compute one chunk at a time
         total_loss = 0.0
